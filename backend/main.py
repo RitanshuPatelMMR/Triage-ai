@@ -2,27 +2,21 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
-from langchain_groq import ChatGroq
-from langchain_core.messages import SystemMessage, HumanMessage
+from sse_starlette.sse import EventSourceResponse
 import os
 import json
+import asyncio
 
 load_dotenv()
 
-app = FastAPI(title="TriageAI", version="1.0.0")
+app = FastAPI(title="TriageAI", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # Vite default port
+    allow_origins=["http://localhost:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-)
-
-# ── LLM instance — shared across all routes ───────────────────────────────
-llm = ChatGroq(
-    model="llama-3.1-8b-instant",
-    api_key=os.getenv("GROQ_API_KEY")
 )
 
 
@@ -34,51 +28,106 @@ class NoteInput(BaseModel):
 # ── Health check ──────────────────────────────────────────────────────────
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "1.0.0"}
+    return {"status": "ok", "version": "2.0.0"}
 
 
-# ── Phase 1: Clean endpoint ───────────────────────────────────────────────
-@app.post("/analyze/clean")
-async def clean_note(note: NoteInput):
-    """Node 1 test — expand abbreviations and return clean text"""
-    from agent.prompts import CLEAN_SYSTEM_PROMPT
+# ── Main streaming endpoint ───────────────────────────────────────────────
+@app.post("/analyze/stream")
+async def analyze_stream(note: NoteInput):
+    """
+    Full LangGraph agent with SSE streaming.
+    Frontend receives live step updates as each node completes.
+    """
+    from agent.graph import agent
 
-    messages = [
-        SystemMessage(content=CLEAN_SYSTEM_PROMPT),
-        HumanMessage(content=note.text)
-    ]
+    async def event_generator():
+        # ── Initial state ─────────────────────────────
+        state = {
+            "raw_input": note.text,
+            "input_type": "text",
+            "cleaned_text": "",
+            "entities": {},
+            "drug_warnings": [],
+            "rag_context": "",
+            "icd_codes": {},
+            "final_report": {},
+            "errors": [],
+            "confidence_flags": [],
+            "current_step": "Starting analysis..."
+        }
 
-    result = await llm.ainvoke(messages)
-    return {"cleaned_text": result.content}
+        # ── Send started event ────────────────────────
+        yield {
+            "event": "started",
+            "data": json.dumps({"message": "Agent started"})
+        }
+
+        try:
+            # ── Stream each node update ───────────────
+            async for chunk in agent.astream(state):
+                # chunk is a dict like {"node_name": updated_state}
+                node_name = list(chunk.keys())[0]
+                node_state = chunk[node_name]
+
+                # Send step update to frontend
+                yield {
+                    "event": "step",
+                    "data": json.dumps({
+                        "node": node_name,
+                        "step": node_state.get("current_step", ""),
+                        "errors": node_state.get("errors", [])
+                    })
+                }
+
+                # Small delay so frontend can render each step visibly
+                await asyncio.sleep(0.3)
+
+                # Track latest state
+                state.update(node_state)
+
+            # ── Send final report ─────────────────────
+            yield {
+                "event": "complete",
+                "data": json.dumps({
+                    "report": state.get("final_report", {}),
+                    "errors": state.get("errors", [])
+                })
+            }
+
+        except Exception as e:
+            yield {
+                "event": "error",
+                "data": json.dumps({"error": str(e)})
+            }
+
+    return EventSourceResponse(event_generator())
 
 
-# ── Phase 1: Extract endpoint ─────────────────────────────────────────────
-@app.post("/analyze/extract")
-async def extract_entities(note: NoteInput):
-    """Node 2 test — extract structured JSON entities"""
-    from agent.prompts import EXTRACT_SYSTEM_PROMPT
+# ── Non-streaming endpoint (useful for testing) ───────────────────────────
+@app.post("/analyze")
+async def analyze(note: NoteInput):
+    """Full pipeline without streaming — returns complete report at once"""
+    from agent.graph import agent
 
-    messages = [
-        SystemMessage(content=EXTRACT_SYSTEM_PROMPT),
-        HumanMessage(content=note.text)
-    ]
+    state = {
+        "raw_input": note.text,
+        "input_type": "text",
+        "cleaned_text": "",
+        "entities": {},
+        "drug_warnings": [],
+        "rag_context": "",
+        "icd_codes": {},
+        "final_report": {},
+        "errors": [],
+        "confidence_flags": [],
+        "current_step": ""
+    }
 
-    result = await llm.ainvoke(messages)
-
-    # Parse JSON safely
-    try:
-        entities = json.loads(result.content)
-    except json.JSONDecodeError:
-        # Sometimes LLM adds markdown — strip it
-        clean = result.content.strip()
-        if clean.startswith("```"):
-            clean = clean.split("```")[1]
-            if clean.startswith("json"):
-                clean = clean[4:]
-        entities = json.loads(clean.strip())
-
-    return {"entities": entities}
+    result = await agent.ainvoke(state)
+    return {
+        "report": result.get("final_report", {}),
+        "errors": result.get("errors", [])
+    }
 
 
-# ── Run instructions ──────────────────────────────────────────────────────
-# cd backend && uvicorn main:app --reload
+# ── Run: uvicorn main:app --reload ────────────────────────────────────────
