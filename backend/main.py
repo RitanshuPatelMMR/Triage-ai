@@ -9,6 +9,10 @@ import asyncio
 
 load_dotenv()
 
+# ── Load FAISS index at startup ───────────────────────────────────────────
+from rag.retriever import load_index
+load_index()
+
 app = FastAPI(title="TriageAI", version="2.0.0")
 
 app.add_middleware(

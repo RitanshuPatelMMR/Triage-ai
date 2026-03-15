@@ -1,7 +1,48 @@
+# ── Environment & Secrets ─────────────────────────────────────────────────
 .env
+.env.local
+.env.production
+
+# ── Python ───────────────────────────────────────────────────────────────
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
+*.pycache
+.Python
+*.egg-info/
+dist/
+build/
+
+# ── RAG Data Files ────────────────────────────────
+backend/data/medical_kb.index
+backend/data/medical_kb_texts.json
+backend/data/mtsamples.csv
+backend/data/icd10_codes.csv
+
+# ── ML Model Cache ────────────────────────────────────────────────────────
+.cache/
+*.bin
+*.safetensors
+
+# ── Node / React ──────────────────────────────────────────────────────────
 node_modules/
-*.index
+frontend/dist/
+frontend/build/
+
+# ── Mac System Files ──────────────────────────────────────────────────────
 .DS_Store
+.AppleDouble
+.LSOverride
+
+# ── VS Code ───────────────────────────────────────────────────────────────
+.vscode/
+*.code-workspace
+
+# ── Logs ──────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Fine Tuning ───────────────────────────────────────────────────────────
+fine_tuning/training_data.jsonl
+fine_tuning/results/

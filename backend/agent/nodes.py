@@ -140,50 +140,47 @@ async def check_drug_interactions(state: AgentState) -> AgentState:
     return state
 
 
-# ── NODE 4: RAG Enrich (stub for Phase 2 — real in Phase 3) ──────────────
+# ── NODE 4: RAG Enrich (real FAISS search) ────────────────────────────────
 async def rag_enrich(state: AgentState) -> AgentState:
-    """Stub — returns basic ICD codes. Real RAG added in Phase 3"""
+    """Search FAISS knowledge base for ICD-10 codes and clinical context"""
     state["current_step"] = "🧠 Searching medical knowledge base..."
 
-    # Basic ICD-10 mapping — will be replaced with FAISS search in Phase 3
-    basic_icd = {
-        "hypertension": "I10",
-        "type 2 diabetes": "E11.9",
-        "type 2 diabetes mellitus": "E11.9",
-        "diabetes": "E11.9",
-        "chest pain": "R07.9",
-        "shortness of breath": "R06.00",
-        "pneumonia": "J18.9",
-        "heart failure": "I50.9",
-        "atrial fibrillation": "I48.91",
-        "hypothyroidism": "E03.9",
-        "asthma": "J45.909",
-        "copd": "J44.9",
-        "anxiety": "F41.9",
-        "depression": "F32.9",
-        "urinary tract infection": "N39.0",
-    }
-
     try:
+        from rag.retriever import search_icd_codes, search, is_loaded
+
         conditions = state["entities"].get("conditions", [])
-        icd_codes = {}
 
-        for condition in conditions:
-            condition_lower = condition.lower().strip()
-            # Check basic mapping first
-            if condition_lower in basic_icd:
-                icd_codes[condition] = basic_icd[condition_lower]
-            else:
-                # Try partial match
-                for key, code in basic_icd.items():
-                    if key in condition_lower or condition_lower in key:
-                        icd_codes[condition] = code
-                        break
-                else:
-                    icd_codes[condition] = "Code pending — RAG Phase 3"
+        if not conditions or not is_loaded():
+            # Fallback to basic mapping if index not loaded
+            basic_icd = {
+                "hypertension": "I10",
+                "type 2 diabetes": "E11.9",
+                "diabetes": "E11.9",
+                "chest pain": "R07.9",
+                "shortness of breath": "R06.00",
+            }
+            icd_codes = {}
+            for condition in conditions:
+                icd_codes[condition] = basic_icd.get(
+                    condition.lower(), "Pending RAG"
+                )
+            state["icd_codes"] = icd_codes
+            state["rag_context"] = "Used basic mapping (index not loaded)"
+            return state
 
+        # Real FAISS search for ICD codes
+        icd_codes = search_icd_codes(conditions)
         state["icd_codes"] = icd_codes
-        state["rag_context"] = f"Mapped {len(icd_codes)} conditions to ICD-10 codes"
+
+        # Also retrieve clinical context for summary generation
+        chief_complaint = state["entities"].get("chief_complaint", "")
+        if chief_complaint:
+            context_results = search(chief_complaint, top_k=3)
+            context_snippets = [r["text"][:200] for r in context_results
+                                 if r.get("source") == "mtsamples"]
+            state["rag_context"] = " | ".join(context_snippets[:2])
+        else:
+            state["rag_context"] = ""
 
     except Exception as e:
         state["errors"].append(f"rag_enrich: {str(e)}")
