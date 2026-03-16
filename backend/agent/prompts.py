@@ -48,32 +48,31 @@ Return ONLY the expanded text. Do not add any explanation or extra words.
 
 # ── Node 2: Extract clinical entities ─────────────────────────────────────
 EXTRACT_SYSTEM_PROMPT = """
-You are a clinical data extraction engine.
-Extract structured data from the medical note and return ONLY valid JSON.
+You are a clinical data extractor. Extract ALL medical information from the note.
+Return ONLY valid JSON. Follow these rules STRICTLY:
 
-Return exactly this structure — no extra text, no markdown, no explanation:
+1. "conditions" must be a plain array of strings: ["Hypertension", "Type 2 Diabetes"]
+   NEVER return: [{"condition": "Hypertension"}] — only plain strings
+   
+2. "allergies" must be a plain array of strings: ["PCN", "sulfa"]
+   NEVER return: [{"allergy": "PCN"}] — only plain strings
+   
+3. "medications" must be array of objects with ONLY these keys:
+   [{"name": "metformin", "dose": "500mg", "frequency": "twice daily"}]
+   NEVER nest or add extra keys
+   
+4. "vitals" must be flat: {"bp": "158/94", "hr": "102", "rr": null, "o2_sat": "94%"}
+
+5. "patient" must be: {"age": 67, "gender": "male"}
+   age must be a NUMBER not a string
+
+Return exactly this structure:
 {
-  "patient": {
-    "age": null,
-    "gender": null
-  },
+  "patient": {"age": null, "gender": null},
   "chief_complaint": "",
   "conditions": [],
-  "medications": [
-    {
-      "name": "",
-      "dose": "",
-      "frequency": ""
-    }
-  ],
-  "vitals": {
-    "bp": null,
-    "hr": null,
-    "rr": null,
-    "o2_sat": null,
-    "temp": null,
-    "weight": null
-  },
+  "medications": [{"name": "", "dose": "", "frequency": ""}],
+  "vitals": {"bp": null, "hr": null, "rr": null, "o2_sat": null, "temp": null, "weight": null},
   "allergies": [],
   "plan": [],
   "follow_up": ""
@@ -93,7 +92,27 @@ SUMMARY_SYSTEM_PROMPT = """
 You are a clinical documentation assistant.
 You will receive structured patient data and generate a clean professional summary.
 
-Return ONLY valid JSON with exactly this structure:
+Return ONLY valid JSON with exactly this structure — follow these rules STRICTLY:
+
+1. "conditions_with_codes" must be array of objects:
+   [{"condition": "Hypertension", "icd_code": "I10"}]
+   NEVER return plain strings in this array
+
+2. "medications" must be array of objects with ONLY these keys:
+   [{"name": "metformin", "dose": "500mg", "frequency": "twice daily"}]
+   NEVER nest or add extra keys. NEVER return plain strings.
+
+3. "allergies" must be plain strings: ["PCN", "sulfa"]
+   NEVER return: [{"allergy": "PCN"}]
+
+4. "urgent_flags" must be plain strings: ["chest pain", "ST elevation"]
+   NEVER return objects in this array
+
+5. "age" must be a NUMBER: 67 not "67 years old"
+
+6. "gender" must be "male" or "female" only
+
+Return exactly this structure:
 {
   "plain_english_summary": "",
   "patient_card": {
@@ -103,8 +122,17 @@ Return ONLY valid JSON with exactly this structure:
     "conditions_with_codes": [
       {"condition": "", "icd_code": ""}
     ],
-    "medications": [],
-    "vitals": {},
+    "medications": [
+      {"name": "", "dose": "", "frequency": ""}
+    ],
+    "vitals": {
+      "bp": null,
+      "hr": null,
+      "rr": null,
+      "o2_sat": null,
+      "temp": null,
+      "weight": null
+    },
     "allergies": []
   },
   "drug_interaction_summary": "",
@@ -116,7 +144,7 @@ Return ONLY valid JSON with exactly this structure:
 Rules:
 - plain_english_summary: 2-3 sentences a non-doctor can understand
 - referral_text: professional copy-ready text for referring to a specialist
-- urgent_flags: list any critical findings that need immediate attention
+- urgent_flags: list any critical findings needing IMMEDIATE attention
 - If drug warnings exist, summarize them in drug_interaction_summary
-- Return ONLY the JSON, nothing else
+- Return ONLY the JSON object, nothing else, no markdown
 """
