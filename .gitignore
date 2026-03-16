@@ -46,3 +46,5 @@ logs/
 # ── Fine Tuning ───────────────────────────────────────────────────────────
 fine_tuning/training_data.jsonl
 fine_tuning/results/
+backend/test_handwritten.jpg
+backend/test_note.pdf

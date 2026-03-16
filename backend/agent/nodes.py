@@ -140,7 +140,6 @@ async def check_drug_interactions(state: AgentState) -> AgentState:
     return state
 
 
-# ── NODE 4: RAG Enrich (real FAISS search) ────────────────────────────────
 async def rag_enrich(state: AgentState) -> AgentState:
     """Search FAISS knowledge base for ICD-10 codes and clinical context"""
     state["current_step"] = "🧠 Searching medical knowledge base..."
@@ -148,10 +147,20 @@ async def rag_enrich(state: AgentState) -> AgentState:
     try:
         from rag.retriever import search_icd_codes, search, is_loaded
 
-        conditions = state["entities"].get("conditions", [])
+        raw_conditions = state["entities"].get("conditions", [])
+
+        # ── Normalize conditions to strings ───────────────────────────────
+        # LLM sometimes returns list of dicts instead of list of strings
+        conditions = []
+        for c in raw_conditions:
+            if isinstance(c, str):
+                conditions.append(c.strip())
+            elif isinstance(c, dict):
+                # Extract name field if dict
+                name = c.get("name") or c.get("condition") or c.get("diagnosis") or str(c)
+                conditions.append(name.strip())
 
         if not conditions or not is_loaded():
-            # Fallback to basic mapping if index not loaded
             basic_icd = {
                 "hypertension": "I10",
                 "type 2 diabetes": "E11.9",
@@ -172,7 +181,7 @@ async def rag_enrich(state: AgentState) -> AgentState:
         icd_codes = search_icd_codes(conditions)
         state["icd_codes"] = icd_codes
 
-        # Also retrieve clinical context for summary generation
+        # Retrieve clinical context for summary
         chief_complaint = state["entities"].get("chief_complaint", "")
         if chief_complaint:
             context_results = search(chief_complaint, top_k=3)
