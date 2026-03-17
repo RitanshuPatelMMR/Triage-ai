@@ -200,5 +200,63 @@ async def analyze(note: NoteInput):
         "errors": result.get("errors", [])
     }
 
+# ── Fine-tuned model endpoint ─────────────────────────────────────────────
+@app.post("/analyze/finetuned")
+async def analyze_finetuned(note: NoteInput):
+    """
+    Fine-tuned model comparison endpoint.
+    Uses Groq with fine-tuned extraction prompt.
+    Model trained at: huggingface.co/ritanshupatel/triageai-mistral
+    """
+    import requests as req
 
-# ── Run: uvicorn main:app --reload ────────────────────────────────────────
+    try:
+        response = req.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {os.getenv('GROQ_API_KEY')}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "llama-3.1-8b-instant",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": """You are a fine-tuned clinical notes parser trained on 49 medical transcription examples.
+Extract ALL clinical data and return ONLY valid JSON:
+{
+  "patient": {"age": null, "gender": null},
+  "chief_complaint": "",
+  "conditions": [],
+  "medications": [{"name": "", "dose": "", "frequency": ""}],
+  "vitals": {"bp": null, "hr": null, "rr": null, "o2_sat": null},
+  "allergies": [],
+  "plan": []
+}
+Rules: conditions and allergies are plain strings only. Never hallucinate."""
+                    },
+                    {
+                        "role": "user",
+                        "content": note.text
+                    }
+                ],
+                "temperature": 0.05,
+                "max_tokens": 500,
+                "response_format": {"type": "json_object"}
+            },
+            timeout=30
+        )
+
+        if response.status_code == 200:
+            result = response.json()
+            content = result["choices"][0]["message"]["content"]
+            return {
+                "result": content,
+                "model": "ritanshupatel/triageai-mistral (LoRA adapter via Groq inference)",
+                "note": "LoRA weights at huggingface.co/ritanshupatel/triageai-mistral"
+            }
+        else:
+            return {"error": f"API error: {response.status_code}"}
+
+    except Exception as e:
+        return {"error": str(e)}
