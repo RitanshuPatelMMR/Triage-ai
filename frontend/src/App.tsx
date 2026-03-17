@@ -6,6 +6,8 @@ import Footer from './components/layout/Footer'
 import HomePage from './pages/HomePage'
 import AnalyzerPage from './pages/AnalyzerPage'
 import HistoryPage from './pages/HistoryPage'
+import NotFoundPage from './pages/NotFoundPage'
+
 
 export default function App() {
   const { isDark, toggle } = useTheme()
@@ -19,6 +21,7 @@ export default function App() {
             <Route path="/" element={<HomePage />} />
             <Route path="/analyze" element={<AnalyzerPage />} />
             <Route path="/history" element={<HistoryPage />} />
+            <Route path="*" element={<NotFoundPage />} />
           </Routes>
         </main>
         <Footer />
