@@ -11,7 +11,6 @@ load_dotenv()
 
 # ── Load FAISS index at startup ───────────────────────────────────────────
 from rag.retriever import load_index
-import os
 if os.path.exists("data/medical_kb.index"):
     load_index()
 else:
@@ -24,7 +23,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "https://*.vercel.app",
-        "https://triage-ai.vercel.app",  # update after Vercel deploy
+        "https://triageai-ritanshupatel.vercel.app",  # update after Vercel deploy
     ],
     allow_credentials=True,
     allow_methods=["*"],
