@@ -17,12 +17,15 @@ app = FastAPI(title="TriageAI", version="3.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+        "https://*.vercel.app",
+        "https://triage-ai.vercel.app",  # update after Vercel deploy
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 # ── Request model ─────────────────────────────────────────────────────────
 class NoteInput(BaseModel):
