@@ -26,6 +26,13 @@ export default function HomePage() {
           Clinical AI — For informational use only
         </div>
 
+        {/* Cold start warning */}
+        <div className="flex items-center justify-center gap-2 p-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 mb-6 max-w-xl mx-auto">
+          <span className="text-amber-600 dark:text-amber-400 text-xs">
+            ⚡ First analysis may take 30-60 seconds to wake up the server. Subsequent requests are fast.
+          </span>
+        </div>
+
         <h1 className="text-4xl sm:text-5xl font-semibold text-stone-900 dark:text-stone-50 leading-tight mb-4">
           Clinical notes,{' '}
           <span className="text-brand-500">structured in seconds</span>

@@ -57,6 +57,11 @@ export function useSSE() {
     setStatus('running')
     setInputType('text')
 
+    // Warn user if backend takes more than 8 seconds (cold start)
+    const coldStartTimer = setTimeout(() => {
+      setError('Backend is waking up from sleep — this may take 30-60 seconds on first load. Please wait...')
+    }, 8000)
+
     try {
       const response = await fetch(`${API_BASE}/analyze/stream`, {
         method: 'POST',
@@ -64,6 +69,8 @@ export function useSSE() {
         body: JSON.stringify({ text }),
       })
 
+      clearTimeout(coldStartTimer)
+      setError(null) 
       const reader = response.body!.getReader()
       readerRef.current = reader
       const decoder = new TextDecoder()
