@@ -196,13 +196,27 @@ def _normalize_entities(raw: dict) -> dict:
     """Force every field into exact shape. Handles any LLM output variation."""
 
     # Normalize conditions → always list of strings
-    raw_conditions = raw.get("conditions", []) or []
+    # Check all keys LLM might use for conditions
+    raw_conditions = (
+        raw.get("conditions") or
+        raw.get("diagnoses") or
+        raw.get("diagnosis") or
+        raw.get("problems") or
+        raw.get("problem_list") or
+        raw.get("assessment") or
+        raw.get("medical_conditions") or
+        []
+    )
     conditions = []
     for c in raw_conditions:
         if isinstance(c, str) and c.strip():
             conditions.append(c.strip())
         elif isinstance(c, dict):
-            name = c.get("name") or c.get("condition") or c.get("diagnosis") or ""
+            name = (
+                c.get("name") or c.get("condition") or
+                c.get("diagnosis") or c.get("description") or
+                c.get("problem") or ""
+            )
             if name:
                 conditions.append(str(name).strip())
 
