@@ -1,4 +1,6 @@
 import { AlertTriangle } from 'lucide-react'
+import EditableField from '../common/EditableField'
+import { ReportEdits } from '../../hooks/useReportEditor'
 
 interface RawMedication {
   name?: string
@@ -21,8 +23,11 @@ interface RawWarning {
 }
 
 interface Props {
-  medications?: (RawMedication | string)[] | any[]
+  medications?: (RawMedication | string)[]
   warnings?: RawWarning[]
+  edits: ReportEdits
+  confidenceFlags?: string[]
+  onEdit: <K extends keyof ReportEdits>(field: K, value: ReportEdits[K]) => void
 }
 
 function normalizeMed(raw: RawMedication | string) {
@@ -36,8 +41,11 @@ function normalizeMed(raw: RawMedication | string) {
   }
 }
 
-export default function MedicationTable({ medications, warnings }: Props) {
+export default function MedicationTable({ medications, warnings, edits, confidenceFlags, onEdit }: Props) {
   if (!medications?.length) return null
+
+  const flagged = (confidenceFlags ?? []).join(' ').toLowerCase()
+  const isMedFlagged = flagged.includes('med') || flagged.includes('inferred')
 
   const warnedDrugs = new Set(
     (warnings ?? []).map(w => (w.drug ?? w.name ?? '').toLowerCase())
@@ -62,17 +70,54 @@ export default function MedicationTable({ medications, warnings }: Props) {
             {medications.map((raw, i) => {
               const med = normalizeMed(raw as RawMedication)
               if (!med.name || med.name === 'Unknown') return null
+
+              const editedMed = edits.medications?.[i] ?? {}
+              const displayName = editedMed.name ?? med.name
+              const displayDose = editedMed.dose ?? med.dose
+              const displayFreq = editedMed.frequency ?? med.frequency
+
               const hasWarning = warnedDrugs.has(med.name.toLowerCase())
+
               return (
                 <tr
                   key={i}
-                  className={`border-b border-stone-100 dark:border-stone-800 last:border-0 ${
-                    hasWarning ? 'bg-amber-50/50 dark:bg-amber-950/20' : ''
-                  }`}
+                  className={`border-b border-stone-100 dark:border-stone-800 last:border-0 ${hasWarning ? 'bg-amber-50/50 dark:bg-amber-950/20' : ''}`}
                 >
-                  <td className="px-3 py-2 font-medium text-stone-800 dark:text-stone-200 capitalize">{med.name}</td>
-                  <td className="px-3 py-2 text-stone-600 dark:text-stone-400">{med.dose || '—'}</td>
-                  <td className="px-3 py-2 text-stone-600 dark:text-stone-400">{med.frequency || '—'}</td>
+                  <td className="px-3 py-2 font-medium text-stone-800 dark:text-stone-200">
+                    <EditableField
+                      value={displayName}
+                      onSave={val => {
+                        const updated = { ...(edits.medications ?? {}) }
+                        updated[i] = { ...(updated[i] ?? {}), name: val }
+                        onEdit('medications', updated)
+                      }}
+                      isHighlighted={isMedFlagged}
+                    />
+                  </td>
+                  <td className="px-3 py-2 text-stone-600 dark:text-stone-400">
+                    <EditableField
+                      value={displayDose}
+                      onSave={val => {
+                        const updated = { ...(edits.medications ?? {}) }
+                        updated[i] = { ...(updated[i] ?? {}), dose: val }
+                        onEdit('medications', updated)
+                      }}
+                      placeholder="—"
+                      isHighlighted={isMedFlagged}
+                    />
+                  </td>
+                  <td className="px-3 py-2 text-stone-600 dark:text-stone-400">
+                    <EditableField
+                      value={displayFreq}
+                      onSave={val => {
+                        const updated = { ...(edits.medications ?? {}) }
+                        updated[i] = { ...(updated[i] ?? {}), frequency: val }
+                        onEdit('medications', updated)
+                      }}
+                      placeholder="—"
+                      isHighlighted={isMedFlagged}
+                    />
+                  </td>
                   <td className="px-3 py-2">
                     {hasWarning && <AlertTriangle size={13} className="text-amber-500" />}
                   </td>

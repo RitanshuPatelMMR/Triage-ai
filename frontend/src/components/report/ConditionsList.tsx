@@ -1,9 +1,18 @@
 import { Condition } from '../../types'
+import EditableField from '../common/EditableField'
+import { ReportEdits } from '../../hooks/useReportEditor'
 
-interface Props { conditions?: Condition[] }
+interface Props {
+  conditions?: Condition[]
+  edits: ReportEdits
+  confidenceFlags?: string[]
+  onEdit: <K extends keyof ReportEdits>(field: K, value: ReportEdits[K]) => void
+}
 
-export default function ConditionsList({ conditions }: Props) {
+export default function ConditionsList({ conditions, edits, confidenceFlags, onEdit }: Props) {
   if (!conditions?.length) return null
+
+  const flagged = (confidenceFlags ?? []).join(' ').toLowerCase()
 
   const getConfidence = (code: string) => {
     if (!code || code === 'Not found') return 40
@@ -29,11 +38,22 @@ export default function ConditionsList({ conditions }: Props) {
           }
 
           const pct = getConfidence(c.icd_code)
+          const displayCondition = edits.conditions?.[i] ?? c.condition
+          const isCondFlagged = flagged.includes('condition') || flagged.includes('inferred')
 
           return (
             <div key={i} className="flex items-center justify-between py-2 border-b border-stone-100 dark:border-stone-800 last:border-0">
-              <span className="text-sm text-stone-800 dark:text-stone-200">{c.condition}</span>
-              <div className="flex items-center gap-3">
+              <EditableField
+                value={displayCondition}
+                onSave={val => {
+                  const updated = { ...(edits.conditions ?? {}) }
+                  updated[i] = val
+                  onEdit('conditions', updated)
+                }}
+                className="text-sm text-stone-800 dark:text-stone-200"
+                isHighlighted={isCondFlagged}
+              />
+              <div className="flex items-center gap-3 flex-shrink-0 ml-2">
                 <div className="flex items-center gap-1.5">
                   <div className="w-16 h-1.5 bg-stone-100 dark:bg-stone-700 rounded-full overflow-hidden">
                     <div
