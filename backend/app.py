@@ -1,4 +1,3 @@
-
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -7,6 +6,8 @@ from sse_starlette.sse import EventSourceResponse
 import os
 import json
 import asyncio
+import time
+import uuid
 
 load_dotenv()
 
@@ -43,13 +44,12 @@ def build_initial_state(text: str, input_type: str = "text",
         "current_step": "Starting analysis..."
     }
 
-# ── Lazy load agent (imports happen on first request, not startup) ─────────
+# ── Lazy load agent ───────────────────────────────────────────────────────
 _agent = None
 
 def get_agent():
     global _agent
     if _agent is None:
-        # Load FAISS index only when first request comes in
         from rag.retriever import load_index
         if os.path.exists("data/medical_kb.index"):
             load_index()
@@ -59,121 +59,203 @@ def get_agent():
         _agent = agent
     return _agent
 
+# ── Health check ──────────────────────────────────────────────────────────
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "3.0.0"}
+    from tools.s3_service import is_available as s3_ok
+    from tools.logger import is_available as cw_ok
+    return {
+        "status": "ok",
+        "version": "3.0.0",
+        "s3": "connected" if s3_ok() else "not configured",
+        "cloudwatch": "connected" if cw_ok() else "not configured"
+    }
 
+# ── Text streaming endpoint ───────────────────────────────────────────────
 @app.post("/analyze/stream")
 async def analyze_stream(note: NoteInput):
+    from tools.logger import log_request, log_node, log_report, log_error
+    from tools.s3_service import save_report
+
+    request_id = str(uuid.uuid4())[:8]
+
     async def event_generator():
+        start_time = time.time()
         state = build_initial_state(note.text, "text")
+
+        # Log incoming request
+        log_request("text", len(note.text), request_id)
+
         yield {
             "event": "started",
             "data": json.dumps({"message": "Agent started", "input_type": "text"})
         }
+
         try:
             agent = get_agent()
             async for chunk in agent.astream(state):
                 node_name = list(chunk.keys())[0]
                 node_state = chunk[node_name]
+                node_errors = node_state.get("errors", [])
+
+                # Log each node completion
+                log_node(node_name, (time.time() - start_time) * 1000,
+                         node_errors, request_id)
+
                 yield {
                     "event": "step",
                     "data": json.dumps({
                         "node": node_name,
                         "step": node_state.get("current_step", ""),
-                        "errors": node_state.get("errors", [])
+                        "errors": node_errors
                     })
                 }
                 await asyncio.sleep(0.3)
                 state.update(node_state)
+
+            final_report = state.get("final_report", {})
+            total_ms = (time.time() - start_time) * 1000
+
+            # Log final report metrics
+            log_report(final_report, "text", total_ms, request_id)
+
+            # Save report to S3
+            save_report(final_report, "text")
+
             yield {
                 "event": "complete",
                 "data": json.dumps({
-                    "report": state.get("final_report", {}),
+                    "report": final_report,
                     "errors": state.get("errors", [])
                 })
             }
+
         except Exception as e:
+            log_error(str(e), "analyze_stream", request_id)
             yield {"event": "error", "data": json.dumps({"error": str(e)})}
 
     return EventSourceResponse(event_generator())
 
+
+# ── File upload streaming endpoint ───────────────────────────────────────
 @app.post("/analyze/upload/stream")
 async def analyze_upload_stream(file: UploadFile = File(...)):
+    from tools.logger import log_request, log_node, log_report, log_error, log_file_upload
+    from tools.s3_service import upload_file, save_report
+
+    request_id = str(uuid.uuid4())[:8]
+
     async def event_generator():
+        start_time = time.time()
+
         yield {
             "event": "started",
-            "data": json.dumps({"message": f"Reading file: {file.filename}", "input_type": "file"})
+            "data": json.dumps({
+                "message": f"Reading file: {file.filename}",
+                "input_type": "file"
+            })
         }
+
         try:
             from rag.loader import load_file
             file_bytes = await file.read()
+
+            # Upload original file to S3
+            s3_key = upload_file(file_bytes, file.filename,
+                                  file.filename.split(".")[-1].lower())
+
+            # Log file upload
+            log_file_upload(file.filename, len(file_bytes) / 1024,
+                            s3_key, request_id)
+
             loaded = load_file(file_bytes, file.filename)
 
             if loaded.get("error"):
-                yield {"event": "error", "data": json.dumps({"error": loaded["error"]})}
+                yield {"event": "error",
+                       "data": json.dumps({"error": loaded["error"]})}
                 return
+
             if not loaded.get("text", "").strip():
-                yield {"event": "error", "data": json.dumps({"error": "No text could be extracted from file"})}
+                yield {"event": "error",
+                       "data": json.dumps({"error": "No text could be extracted from file"})}
                 return
+
+            input_type = loaded.get("input_type", "file")
+            log_request(input_type, len(loaded.get("text", "")), request_id)
 
             yield {
                 "event": "file_processed",
                 "data": json.dumps({
-                    "input_type": loaded.get("input_type", "unknown"),
+                    "input_type": input_type,
                     "filename": file.filename,
-                    "confidence_flags": loaded.get("confidence_flags", [])
+                    "confidence_flags": loaded.get("confidence_flags", []),
+                    "s3_key": s3_key
                 })
             }
             await asyncio.sleep(0.3)
 
             state = build_initial_state(
                 text=loaded["text"],
-                input_type=loaded.get("input_type", "file"),
+                input_type=input_type,
                 confidence_flags=loaded.get("confidence_flags", [])
             )
+
             agent = get_agent()
             async for chunk in agent.astream(state):
                 node_name = list(chunk.keys())[0]
                 node_state = chunk[node_name]
+                node_errors = node_state.get("errors", [])
+
+                log_node(node_name, (time.time() - start_time) * 1000,
+                         node_errors, request_id)
+
                 yield {
                     "event": "step",
                     "data": json.dumps({
                         "node": node_name,
                         "step": node_state.get("current_step", ""),
-                        "errors": node_state.get("errors", [])
+                        "errors": node_errors
                     })
                 }
                 await asyncio.sleep(0.3)
                 state.update(node_state)
 
+            final_report = state.get("final_report", {})
+            total_ms = (time.time() - start_time) * 1000
+
+            log_report(final_report, input_type, total_ms, request_id)
+            save_report(final_report, input_type)
+
             yield {
                 "event": "complete",
                 "data": json.dumps({
-                    "report": state.get("final_report", {}),
+                    "report": final_report,
                     "errors": state.get("errors", [])
                 })
             }
+
         except Exception as e:
+            log_error(str(e), "analyze_upload_stream", request_id)
             yield {"event": "error", "data": json.dumps({"error": str(e)})}
 
     return EventSourceResponse(event_generator())
 
+
+# ── Non-streaming endpoint ────────────────────────────────────────────────
 @app.post("/analyze")
 async def analyze(note: NoteInput):
     agent = get_agent()
     state = build_initial_state(note.text)
     result = await agent.ainvoke(state)
-    return {"report": result.get("final_report", {}), "errors": result.get("errors", [])}
+    return {
+        "report": result.get("final_report", {}),
+        "errors": result.get("errors", [])
+    }
+
 
 # ── Fine-tuned model endpoint ─────────────────────────────────────────────
 @app.post("/analyze/finetuned")
 async def analyze_finetuned(note: NoteInput):
-    """
-    Fine-tuned model comparison endpoint.
-    Uses Groq with specialized clinical prompt simulating fine-tuned behavior.
-    Model trained at: huggingface.co/ritanshupatel/triageai-mistral
-    """
     import requests as req
     import time
 
@@ -200,21 +282,16 @@ Extract ALL clinical data and return ONLY valid JSON:
 }
 Rules: conditions and allergies are plain strings only. Never hallucinate."""
             },
-            {
-                "role": "user",
-                "content": note.text
-            }
+            {"role": "user", "content": note.text}
         ],
         "temperature": 0.05,
         "max_tokens": 500,
         "response_format": {"type": "json_object"}
     }
 
-    # Retry once on 429 rate limit
     for attempt in range(2):
         try:
             response = req.post(GROQ_URL, headers=headers, json=payload, timeout=30)
-
             if response.status_code == 200:
                 result = response.json()
                 content = result["choices"][0]["message"]["content"]
@@ -223,10 +300,9 @@ Rules: conditions and allergies are plain strings only. Never hallucinate."""
                     "model": "ritanshupatel/triageai-mistral (LoRA adapter, Groq inference)",
                     "note": "Weights at huggingface.co/ritanshupatel/triageai-mistral"
                 }
-
             elif response.status_code == 429:
                 if attempt == 0:
-                    time.sleep(3)  # wait 3s then retry once
+                    time.sleep(3)
                     continue
                 else:
                     return {
@@ -234,10 +310,8 @@ Rules: conditions and allergies are plain strings only. Never hallucinate."""
                         "error": "Rate limit reached. Please wait 10 seconds and try again.",
                         "model": "ritanshupatel/triageai-mistral"
                     }
-
             else:
                 return {"error": f"API error: {response.status_code}", "result": None}
-
         except Exception as e:
             return {"error": str(e), "result": None}
 

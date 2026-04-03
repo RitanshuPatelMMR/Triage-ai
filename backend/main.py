@@ -20,7 +20,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "https://*.vercel.app",
-        "https://triage-ai.vercel.app",  # update after Vercel deploy
+        "https://triage-ai.vercel.app",  
     ],
     allow_credentials=True,
     allow_methods=["*"],

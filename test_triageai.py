@@ -7,7 +7,7 @@ import requests
 import json
 import time
 
-BASE_URL = "https://ritanshupatel-triageai-backend.hf.space"
+BASE_URL = "https://ritanshupatel-triageai-backend-1.hf.space"
 
 GREEN  = "\033[92m"
 RED    = "\033[91m"
@@ -310,6 +310,8 @@ except Exception as e:
 
 # ═══════════════════════════════════════════════════════════════════════════
 section("TEST 7: Fine-tuned Model Endpoint")
+time.sleep(10)  # wait for Groq rate limit to reset
+
 # ═══════════════════════════════════════════════════════════════════════════
 try:
     print(f"  Testing /analyze/finetuned...")
