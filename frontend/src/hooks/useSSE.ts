@@ -1,7 +1,9 @@
 import { useState, useCallback, useRef } from 'react'
 import { Report, AgentStep, AnalysisStatus } from '../types'
+import { SESSION_ID } from '../services/historyService'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+
 export function useSSE() {
   const [steps, setSteps] = useState<AgentStep[]>([])
   const [report, setReport] = useState<Report | null>(null)
@@ -17,7 +19,10 @@ export function useSSE() {
     setError(null)
   }, [])
 
-  const parseSSEChunk = useCallback((chunk: string, onComplete: (r: Report) => void) => {
+  const parseSSEChunk = useCallback((
+    chunk: string,
+    onComplete: (r: Report) => void
+  ) => {
     const lines = chunk.split('\n')
     for (const line of lines) {
       if (!line.startsWith('data:')) continue
@@ -28,7 +33,11 @@ export function useSSE() {
           setSteps(prev => {
             const exists = prev.find(s => s.node === data.node)
             if (exists) return prev
-            return [...prev, { node: data.node, step: data.step, errors: data.errors ?? [] }]
+            return [...prev, {
+              node: data.node,
+              step: data.step,
+              errors: data.errors ?? []
+            }]
           })
         }
 
@@ -52,25 +61,31 @@ export function useSSE() {
     }
   }, [])
 
-  const analyzeText = useCallback(async (text: string, onComplete: (r: Report) => void) => {
+  const analyzeText = useCallback(async (
+    text: string,
+    onComplete: (r: Report) => void
+  ) => {
     reset()
     setStatus('running')
     setInputType('text')
 
-    // Warn user if backend takes more than 8 seconds (cold start)
     const coldStartTimer = setTimeout(() => {
-      setError('Backend is waking up from sleep — this may take 30-60 seconds on first load. Please wait...')
+      setError('Backend is waking up — this may take 30-60 seconds. Please wait...')
     }, 8000)
 
     try {
       const response = await fetch(`${API_BASE}/analyze/stream`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-session-id': SESSION_ID      // ← send session ID to backend
+        },
         body: JSON.stringify({ text }),
       })
 
       clearTimeout(coldStartTimer)
-      setError(null) 
+      setError(null)
+
       const reader = response.body!.getReader()
       readerRef.current = reader
       const decoder = new TextDecoder()
@@ -86,7 +101,10 @@ export function useSSE() {
     }
   }, [reset, parseSSEChunk])
 
-  const analyzeFile = useCallback(async (file: File, onComplete: (r: Report) => void) => {
+  const analyzeFile = useCallback(async (
+    file: File,
+    onComplete: (r: Report) => void
+  ) => {
     reset()
     setStatus('running')
 
@@ -100,6 +118,9 @@ export function useSSE() {
 
       const response = await fetch(`${API_BASE}/analyze/upload/stream`, {
         method: 'POST',
+        headers: {
+          'x-session-id': SESSION_ID      // ← send session ID to backend
+        },
         body: formData,
       })
 

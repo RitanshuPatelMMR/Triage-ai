@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -8,10 +8,11 @@ import json
 import asyncio
 import time
 import uuid
+from typing import Optional
 
 load_dotenv()
 
-app = FastAPI(title="TriageAI", version="3.0.0")
+app = FastAPI(title="TriageAI", version="4.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -25,11 +26,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 class NoteInput(BaseModel):
     text: str
 
+
+class VerifyInput(BaseModel):
+    session_id: str
+    created_at: str
+
+
+class DeleteInput(BaseModel):
+    session_id: str
+    created_at: str
+
+
 def build_initial_state(text: str, input_type: str = "text",
-                         confidence_flags: list = None) -> dict:
+                        confidence_flags: list = None) -> dict:
     return {
         "raw_input": text,
         "input_type": input_type,
@@ -44,8 +57,10 @@ def build_initial_state(text: str, input_type: str = "text",
         "current_step": "Starting analysis..."
     }
 
+
 # ── Lazy load agent ───────────────────────────────────────────────────────
 _agent = None
+
 
 def get_agent():
     global _agent
@@ -59,31 +74,64 @@ def get_agent():
         _agent = agent
     return _agent
 
+
 # ── Health check ──────────────────────────────────────────────────────────
 @app.get("/health")
 def health():
     from tools.s3_service import is_available as s3_ok
     from tools.logger import is_available as cw_ok
+    from tools.dynamo_service import is_available as dynamo_ok
     return {
         "status": "ok",
-        "version": "3.0.0",
+        "version": "4.0.0",
         "s3": "connected" if s3_ok() else "not configured",
-        "cloudwatch": "connected" if cw_ok() else "not configured"
+        "cloudwatch": "connected" if cw_ok() else "not configured",
+        "dynamodb": "connected" if dynamo_ok() else "not configured"
     }
+
+
+# ── History endpoints ─────────────────────────────────────────────────────
+@app.get("/history/{session_id}")
+def get_history(session_id: str):
+    """Get all reports for a session."""
+    from tools.dynamo_service import get_history as dynamo_get
+    reports = dynamo_get(session_id)
+    return {"reports": reports, "count": len(reports)}
+
+
+@app.post("/history/verify")
+def verify_report(body: VerifyInput):
+    """Mark a report as human verified."""
+    from tools.dynamo_service import mark_verified
+    success = mark_verified(body.session_id, body.created_at)
+    return {"success": success}
+
+
+@app.delete("/history/delete")
+def delete_report(body: DeleteInput):
+    """Delete a specific report."""
+    from tools.dynamo_service import delete_report as dynamo_delete
+    success = dynamo_delete(body.session_id, body.created_at)
+    return {"success": success}
+
 
 # ── Text streaming endpoint ───────────────────────────────────────────────
 @app.post("/analyze/stream")
-async def analyze_stream(note: NoteInput):
+async def analyze_stream(
+    note: NoteInput,
+    x_session_id: Optional[str] = Header(None)
+):
     from tools.logger import log_request, log_node, log_report, log_error
-    from tools.s3_service import save_report
+    from tools.s3_service import save_report as s3_save
+    from tools.dynamo_service import save_report as dynamo_save
 
     request_id = str(uuid.uuid4())[:8]
+    session_id = x_session_id or "anonymous"
 
     async def event_generator():
         start_time = time.time()
         state = build_initial_state(note.text, "text")
 
-        # Log incoming request
         log_request("text", len(note.text), request_id)
 
         yield {
@@ -98,7 +146,6 @@ async def analyze_stream(note: NoteInput):
                 node_state = chunk[node_name]
                 node_errors = node_state.get("errors", [])
 
-                # Log each node completion
                 log_node(node_name, (time.time() - start_time) * 1000,
                          node_errors, request_id)
 
@@ -116,17 +163,27 @@ async def analyze_stream(note: NoteInput):
             final_report = state.get("final_report", {})
             total_ms = (time.time() - start_time) * 1000
 
-            # Log final report metrics
             log_report(final_report, "text", total_ms, request_id)
 
-            # Save report to S3
-            save_report(final_report, "text")
+            # Save to S3
+            s3_key = s3_save(final_report, "text")
+
+            # Save to DynamoDB
+            dynamo_save(
+                session_id=session_id,
+                request_id=request_id,
+                report=final_report,
+                input_type="text",
+                s3_key=s3_key
+            )
 
             yield {
                 "event": "complete",
                 "data": json.dumps({
                     "report": final_report,
-                    "errors": state.get("errors", [])
+                    "errors": state.get("errors", []),
+                    "request_id": request_id,
+                    "created_at": time.strftime("%Y-%m-%dT%H:%M:%S")
                 })
             }
 
@@ -139,11 +196,16 @@ async def analyze_stream(note: NoteInput):
 
 # ── File upload streaming endpoint ───────────────────────────────────────
 @app.post("/analyze/upload/stream")
-async def analyze_upload_stream(file: UploadFile = File(...)):
+async def analyze_upload_stream(
+    file: UploadFile = File(...),
+    x_session_id: Optional[str] = Header(None)
+):
     from tools.logger import log_request, log_node, log_report, log_error, log_file_upload
-    from tools.s3_service import upload_file, save_report
+    from tools.s3_service import upload_file, save_report as s3_save
+    from tools.dynamo_service import save_report as dynamo_save
 
     request_id = str(uuid.uuid4())[:8]
+    session_id = x_session_id or "anonymous"
 
     async def event_generator():
         start_time = time.time()
@@ -160,11 +222,8 @@ async def analyze_upload_stream(file: UploadFile = File(...)):
             from rag.loader import load_file
             file_bytes = await file.read()
 
-            # Upload original file to S3
             s3_key = upload_file(file_bytes, file.filename,
-                                  file.filename.split(".")[-1].lower())
-
-            # Log file upload
+                                 file.filename.split(".")[-1].lower())
             log_file_upload(file.filename, len(file_bytes) / 1024,
                             s3_key, request_id)
 
@@ -224,13 +283,24 @@ async def analyze_upload_stream(file: UploadFile = File(...)):
             total_ms = (time.time() - start_time) * 1000
 
             log_report(final_report, input_type, total_ms, request_id)
-            save_report(final_report, input_type)
+
+            report_s3_key = s3_save(final_report, input_type)
+
+            dynamo_save(
+                session_id=session_id,
+                request_id=request_id,
+                report=final_report,
+                input_type=input_type,
+                s3_key=s3_key
+            )
 
             yield {
                 "event": "complete",
                 "data": json.dumps({
                     "report": final_report,
-                    "errors": state.get("errors", [])
+                    "errors": state.get("errors", []),
+                    "request_id": request_id,
+                    "created_at": time.strftime("%Y-%m-%dT%H:%M:%S")
                 })
             }
 
@@ -291,7 +361,8 @@ Rules: conditions and allergies are plain strings only. Never hallucinate."""
 
     for attempt in range(2):
         try:
-            response = req.post(GROQ_URL, headers=headers, json=payload, timeout=30)
+            response = req.post(GROQ_URL, headers=headers,
+                                json=payload, timeout=30)
             if response.status_code == 200:
                 result = response.json()
                 content = result["choices"][0]["message"]["content"]
@@ -311,7 +382,8 @@ Rules: conditions and allergies are plain strings only. Never hallucinate."""
                         "model": "ritanshupatel/triageai-mistral"
                     }
             else:
-                return {"error": f"API error: {response.status_code}", "result": None}
+                return {"error": f"API error: {response.status_code}",
+                        "result": None}
         except Exception as e:
             return {"error": str(e), "result": None}
 
