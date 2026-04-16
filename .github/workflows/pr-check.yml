@@ -1,0 +1,42 @@
+name: PR Check
+
+on:
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: Test before merge
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Check backend is live
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://ritanshupatel-triageai-backend-1.hf.space/health)
+          echo "Backend status: $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "Backend is down - cannot run tests"
+            exit 1
+          fi
+
+      - name: Run tests
+        run: python test_triageai.py
+
+      - name: Frontend build check
+        run: |
+          cd frontend
+          npm install
+          npm run build
+        env:
+          VITE_API_URL: https://ritanshupatel-triageai-backend-1.hf.space
