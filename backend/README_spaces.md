@@ -1,6 +1,6 @@
 ---
 title: TriageAI Backend
-emoji: 🏥
+emoji: 🔬
 colorFrom: red
 colorTo: red
 sdk: docker
