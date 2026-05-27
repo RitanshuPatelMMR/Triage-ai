@@ -43,11 +43,12 @@ def load_file(file_bytes: bytes, filename: str) -> dict:
 
 
 def _load_pdf(file_bytes: bytes, filename: str) -> dict:
-    """Extract text from PDF using pypdf"""
+    """Extract text from PDF using pypdf, fallback to OCR for scanned PDFs"""
     try:
         import pypdf
 
-        pdf_reader = pypdf.PdfReader(io.BytesIO(file_bytes))
+        pdf_stream = io.BytesIO(file_bytes)  # Bug A fix: pin reference
+        pdf_reader = pypdf.PdfReader(pdf_stream)
         pages_text = []
 
         for page_num, page in enumerate(pdf_reader.pages):
@@ -55,30 +56,87 @@ def _load_pdf(file_bytes: bytes, filename: str) -> dict:
             if page_text and page_text.strip():
                 pages_text.append(page_text.strip())
 
-        if not pages_text:
+        # Bug B fix: detect junk/empty extraction → fallback to OCR
+        full_text = "\n\n".join(pages_text)
+        if _is_meaningful_text(full_text):
+            return {
+                "text": full_text,
+                "input_type": "pdf",
+                "page_count": len(pdf_reader.pages),
+                "pages_with_text": len(pages_text),
+                "confidence_flags": []
+            }
+
+        # Fallback: render PDF as image → Groq Vision OCR
+        return _load_pdf_via_ocr(file_bytes)
+
+    except Exception as e:
+        # Last resort: try OCR anyway
+        try:
+            return _load_pdf_via_ocr(file_bytes)
+        except Exception:
             return {
                 "text": "",
                 "input_type": "pdf",
-                "error": "No text could be extracted from PDF. It may be a scanned image PDF.",
-                "confidence_flags": ["PDF appears to be image-based — text extraction failed"]
+                "error": str(e),
+                "confidence_flags": [f"PDF loading failed: {str(e)}"]
             }
 
-        full_text = "\n\n".join(pages_text)
+
+def _is_meaningful_text(text: str) -> bool:
+    """Check if extracted text is real content vs junk metadata"""
+    if not text or len(text.strip()) < 50:
+        return False
+    # Junk signals: URLs, pixel dimensions, image filenames
+    junk_signals = ["http", ".jpg", ".png", "pixels", "Page 1 of 1"]
+    junk_count = sum(1 for s in junk_signals if s in text)
+    return junk_count < 2
+
+
+def _load_pdf_via_ocr(file_bytes: bytes) -> dict:
+    """Render PDF pages as images → Groq Vision OCR"""
+    try:
+        from pdf2image import convert_from_bytes
+        import io as _io
+
+        pages = convert_from_bytes(file_bytes, dpi=200, first_page=1, last_page=3)
+
+        all_texts = []
+        all_flags = []
+
+        for i, page_img in enumerate(pages):
+            # Convert PIL image → bytes
+            img_buffer = _io.BytesIO()
+            page_img.save(img_buffer, format="JPEG", quality=90)
+            img_bytes = img_buffer.getvalue()
+
+            result = transcribe_image(img_bytes, "image/jpeg")
+
+            if result.get("text", "").strip():
+                all_texts.append(result["text"])
+            all_flags.extend(result.get("confidence_flags", []))
+
+        if not all_texts:
+            return {
+                "text": "",
+                "input_type": "pdf_ocr",
+                "error": "OCR could not extract text from PDF pages",
+                "confidence_flags": ["PDF OCR failed — no text found"]
+            }
 
         return {
-            "text": full_text,
-            "input_type": "pdf",
-            "page_count": len(pdf_reader.pages),
-            "pages_with_text": len(pages_text),
-            "confidence_flags": []
+            "text": "\n\n".join(all_texts),
+            "input_type": "pdf_ocr",
+            "page_count": len(pages),
+            "confidence_flags": all_flags or ["PDF processed via OCR — verify before clinical use"]
         }
 
     except Exception as e:
         return {
             "text": "",
-            "input_type": "pdf",
+            "input_type": "pdf_ocr",
             "error": str(e),
-            "confidence_flags": [f"PDF loading failed: {str(e)}"]
+            "confidence_flags": [f"PDF OCR failed: {str(e)}"]
         }
 
 
