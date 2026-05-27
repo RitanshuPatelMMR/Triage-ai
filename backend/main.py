@@ -110,20 +110,22 @@ async def analyze_upload_stream(file: UploadFile = File(...)):
     from agent.graph import agent
     from rag.loader import load_file
 
+    file_bytes = await file.read()
+    filename = file.filename or "upload"
+
     async def event_generator():
 
         # Step 1: Read and parse the file
         yield {
             "event": "started",
             "data": json.dumps({
-                "message": f"Reading file: {file.filename}",
+                "message": f"Reading file: {filename}",
                 "input_type": "file"
             })
         }
 
         try:
-            file_bytes = await file.read()
-            loaded = load_file(file_bytes, file.filename)
+            loaded = load_file(file_bytes, filename)
 
             # Check for loading errors
             if loaded.get("error"):
@@ -145,7 +147,7 @@ async def analyze_upload_stream(file: UploadFile = File(...)):
                 "event": "file_processed",
                 "data": json.dumps({
                     "input_type": loaded.get("input_type", "unknown"),
-                    "filename": file.filename,
+                    "filename": filename,
                     "confidence_flags": loaded.get("confidence_flags", [])
                 })
             }

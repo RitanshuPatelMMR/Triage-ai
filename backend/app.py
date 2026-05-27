@@ -207,27 +207,29 @@ async def analyze_upload_stream(
     request_id = str(uuid.uuid4())[:8]
     session_id = x_session_id or "anonymous"
 
+    file_bytes = await file.read()
+    filename = file.filename or "upload"
+
     async def event_generator():
         start_time = time.time()
 
         yield {
             "event": "started",
             "data": json.dumps({
-                "message": f"Reading file: {file.filename}",
+                "message": f"Reading file: {filename}",
                 "input_type": "file"
             })
         }
 
         try:
             from rag.loader import load_file
-            file_bytes = await file.read()
 
-            s3_key = upload_file(file_bytes, file.filename,
-                                 file.filename.split(".")[-1].lower())
-            log_file_upload(file.filename, len(file_bytes) / 1024,
+            s3_key = upload_file(file_bytes, filename,
+                                 filename.split(".")[-1].lower())
+            log_file_upload(filename, len(file_bytes) / 1024,
                             s3_key, request_id)
 
-            loaded = load_file(file_bytes, file.filename)
+            loaded = load_file(file_bytes, filename)
 
             if loaded.get("error"):
                 yield {"event": "error",
@@ -246,7 +248,7 @@ async def analyze_upload_stream(
                 "event": "file_processed",
                 "data": json.dumps({
                     "input_type": input_type,
-                    "filename": file.filename,
+                    "filename": filename,
                     "confidence_flags": loaded.get("confidence_flags", []),
                     "s3_key": s3_key
                 })
