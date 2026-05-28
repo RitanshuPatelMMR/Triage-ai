@@ -12,6 +12,8 @@ from typing import Optional
 
 load_dotenv()
 
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
+
 app = FastAPI(title="TriageAI", version="4.0.0")
 
 app.add_middleware(
@@ -81,9 +83,11 @@ def health():
     from tools.s3_service import is_available as s3_ok
     from tools.logger import is_available as cw_ok
     from tools.dynamo_service import is_available as dynamo_ok
+    from tools.groq_utils import groq_configured
     return {
         "status": "ok",
         "version": "4.0.0",
+        "groq": "configured" if groq_configured() else "missing",
         "s3": "connected" if s3_ok() else "not configured",
         "cloudwatch": "connected" if cw_ok() else "not configured",
         "dynamodb": "connected" if dynamo_ok() else "not configured"
@@ -124,15 +128,28 @@ async def analyze_stream(
     from tools.logger import log_request, log_node, log_report, log_error
     from tools.s3_service import save_report as s3_save
     from tools.dynamo_service import save_report as dynamo_save
+    from tools.errors import user_safe_error
+    from tools.groq_utils import groq_configured, GROQ_MISSING_MSG
+
+    text = (note.text or "").strip()
+    if not text:
+        async def empty_generator():
+            yield {
+                "event": "error",
+                "data": json.dumps({
+                    "error": "Please enter a clinical note before analyzing."
+                })
+            }
+        return EventSourceResponse(empty_generator())
 
     request_id = str(uuid.uuid4())[:8]
     session_id = x_session_id or "anonymous"
 
     async def event_generator():
         start_time = time.time()
-        state = build_initial_state(note.text, "text")
+        state = build_initial_state(text, "text")
 
-        log_request("text", len(note.text), request_id)
+        log_request("text", len(text), request_id)
 
         yield {
             "event": "started",
@@ -140,6 +157,11 @@ async def analyze_stream(
         }
 
         try:
+            if not groq_configured():
+                yield {"event": "error",
+                       "data": json.dumps({"error": GROQ_MISSING_MSG})}
+                return
+
             agent = get_agent()
             async for chunk in agent.astream(state):
                 node_name = list(chunk.keys())[0]
@@ -189,7 +211,8 @@ async def analyze_stream(
 
         except Exception as e:
             log_error(str(e), "analyze_stream", request_id)
-            yield {"event": "error", "data": json.dumps({"error": str(e)})}
+            yield {"event": "error",
+                   "data": json.dumps({"error": user_safe_error(e)})}
 
     return EventSourceResponse(event_generator())
 
@@ -203,12 +226,36 @@ async def analyze_upload_stream(
     from tools.logger import log_request, log_node, log_report, log_error, log_file_upload
     from tools.s3_service import upload_file, save_report as s3_save
     from tools.dynamo_service import save_report as dynamo_save
+    from tools.errors import user_safe_error, map_loader_error
+    from tools.groq_utils import groq_configured, GROQ_MISSING_MSG
 
     request_id = str(uuid.uuid4())[:8]
     session_id = x_session_id or "anonymous"
 
     file_bytes = await file.read()
     filename = file.filename or "upload"
+
+    if len(file_bytes) > MAX_UPLOAD_BYTES:
+        max_mb = MAX_UPLOAD_BYTES // (1024 * 1024)
+
+        async def too_large_generator():
+            yield {
+                "event": "error",
+                "data": json.dumps({
+                    "error": f"File too large (max {max_mb} MB). Try a smaller PDF or image."
+                })
+            }
+
+        return EventSourceResponse(too_large_generator())
+
+    if len(file_bytes) == 0:
+        async def empty_file_generator():
+            yield {
+                "event": "error",
+                "data": json.dumps({"error": "Uploaded file is empty."})
+            }
+
+        return EventSourceResponse(empty_file_generator())
 
     async def event_generator():
         start_time = time.time()
@@ -222,6 +269,11 @@ async def analyze_upload_stream(
         }
 
         try:
+            if not groq_configured():
+                yield {"event": "error",
+                       "data": json.dumps({"error": GROQ_MISSING_MSG})}
+                return
+
             from rag.loader import load_file
 
             s3_key = upload_file(file_bytes, filename,
@@ -233,7 +285,9 @@ async def analyze_upload_stream(
 
             if loaded.get("error"):
                 yield {"event": "error",
-                       "data": json.dumps({"error": loaded["error"]})}
+                       "data": json.dumps({
+                           "error": map_loader_error(loaded["error"])
+                       })}
                 return
 
             if not loaded.get("text", "").strip():
@@ -308,7 +362,8 @@ async def analyze_upload_stream(
 
         except Exception as e:
             log_error(str(e), "analyze_upload_stream", request_id)
-            yield {"event": "error", "data": json.dumps({"error": str(e)})}
+            yield {"event": "error",
+                   "data": json.dumps({"error": user_safe_error(e)})}
 
     return EventSourceResponse(event_generator())
 
@@ -316,13 +371,25 @@ async def analyze_upload_stream(
 # ── Non-streaming endpoint ────────────────────────────────────────────────
 @app.post("/analyze")
 async def analyze(note: NoteInput):
-    agent = get_agent()
-    state = build_initial_state(note.text)
-    result = await agent.ainvoke(state)
-    return {
-        "report": result.get("final_report", {}),
-        "errors": result.get("errors", [])
-    }
+    from tools.errors import user_safe_error
+    from tools.groq_utils import groq_configured, GROQ_MISSING_MSG
+
+    text = (note.text or "").strip()
+    if not text:
+        return {"report": {}, "errors": ["Please enter a clinical note before analyzing."]}
+    if not groq_configured():
+        return {"report": {}, "errors": [GROQ_MISSING_MSG]}
+
+    try:
+        agent = get_agent()
+        state = build_initial_state(text)
+        result = await agent.ainvoke(state)
+        return {
+            "report": result.get("final_report", {}),
+            "errors": result.get("errors", [])
+        }
+    except Exception as e:
+        return {"report": {}, "errors": [user_safe_error(e)]}
 
 
 # ── Fine-tuned model endpoint ─────────────────────────────────────────────

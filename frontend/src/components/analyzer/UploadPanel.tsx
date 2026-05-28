@@ -1,4 +1,4 @@
-import { useState, useRef, DragEvent } from 'react'
+import { useState, useRef, DragEvent, useEffect } from 'react'
 import { Upload, FileText, Image, ChevronDown } from 'lucide-react'
 import NoteQualityHint from './NoteQualityHint'
 import AgentLog from './AgentLog'
@@ -27,27 +27,83 @@ const SAMPLE_NOTES = [
   },
 ]
 
+const MIN_NOTE_LENGTH = 30
+const MAX_FILE_BYTES = 10 * 1024 * 1024
+const ALLOWED_EXTENSIONS = new Set(['pdf', 'jpg', 'jpeg', 'png'])
+
+function validateFile(file: File): string | null {
+  if (file.size === 0) return 'File is empty. Choose another file.'
+  if (file.size > MAX_FILE_BYTES) return 'File is too large (max 10 MB).'
+  const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
+  if (!ALLOWED_EXTENSIONS.has(ext)) {
+    return 'Only PDF, JPG, and PNG files are supported.'
+  }
+  return null
+}
+
 interface Props {
   onAnalyzeText: (text: string) => void
   onAnalyzeFile: (file: File) => void
   steps: AgentStep[]
   status: AnalysisStatus
+  coldStartHint?: string | null
+  panelError?: string | null
 }
 
-export default function UploadPanel({ onAnalyzeText, onAnalyzeFile, steps, status }: Props) {
+export default function UploadPanel({
+  onAnalyzeText,
+  onAnalyzeFile,
+  steps,
+  status,
+  coldStartHint,
+  panelError,
+}: Props) {
   const [text, setText] = useState('')
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [fileError, setFileError] = useState<string | null>(null)
   const [isDragging, setIsDragging] = useState(false)
   const [showSamples, setShowSamples] = useState(false)
+  const [isSubmitting, setIsSubmitting] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const isRunning = status === 'running'
 
+  useEffect(() => {
+    if (status !== 'running') {
+      setIsSubmitting(false)
+    }
+  }, [status])
+
+  const selectFile = (file: File) => {
+    const err = validateFile(file)
+    setFileError(err)
+    if (!err) {
+      setSelectedFile(file)
+      setText('')
+    } else {
+      setSelectedFile(null)
+    }
+  }
+
   const handleSubmit = () => {
-    if (isRunning) return
+    if (isRunning || isSubmitting) return
+    setIsSubmitting(true)
+
     if (selectedFile) {
+      const err = validateFile(selectedFile)
+      if (err) {
+        setFileError(err)
+        setIsSubmitting(false)
+        return
+      }
       onAnalyzeFile(selectedFile)
-    } else if (text.trim()) {
-      onAnalyzeText(text.trim())
+      return
+    }
+
+    const trimmed = text.trim()
+    if (trimmed.length >= MIN_NOTE_LENGTH) {
+      onAnalyzeText(trimmed)
+    } else {
+      setIsSubmitting(false)
     }
   }
 
@@ -55,21 +111,27 @@ export default function UploadPanel({ onAnalyzeText, onAnalyzeFile, steps, statu
     e.preventDefault()
     setIsDragging(false)
     const file = e.dataTransfer.files[0]
-    if (file) { setSelectedFile(file); setText('') }
+    if (file) selectFile(file)
   }
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
-    if (file) { setSelectedFile(file); setText('') }
+    if (file) selectFile(file)
   }
 
   const loadSample = (sample: typeof SAMPLE_NOTES[0]) => {
     setText(sample.text)
     setSelectedFile(null)
+    setFileError(null)
     setShowSamples(false)
   }
 
-  const canSubmit = (text.trim().length > 0 || selectedFile !== null) && !isRunning
+  const textTooShort = !selectedFile && text.trim().length > 0 && text.trim().length < MIN_NOTE_LENGTH
+  const canSubmit =
+    !isRunning &&
+    !isSubmitting &&
+    !textTooShort &&
+    (selectedFile ? fileError === null : text.trim().length >= MIN_NOTE_LENGTH)
 
   return (
     <div className="flex flex-col gap-3 h-full">
@@ -100,10 +162,9 @@ export default function UploadPanel({ onAnalyzeText, onAnalyzeFile, steps, statu
         </div>
       </div>
 
-      {/* Text area */}
       <textarea
         value={text}
-        onChange={e => { setText(e.target.value); setSelectedFile(null) }}
+        onChange={e => { setText(e.target.value); setSelectedFile(null); setFileError(null) }}
         placeholder="Paste clinical note here... e.g. pt 67M c/o CP x2hr, PMH DM2 HTN..."
         className="flex-1 min-h-[120px] resize-none text-sm p-3 rounded-xl border border-stone-200 dark:border-stone-700 bg-white dark:bg-stone-900 text-stone-800 dark:text-stone-200 placeholder-stone-400 dark:placeholder-stone-600 focus:outline-none focus:ring-2 focus:ring-brand-300 dark:focus:ring-brand-700 transition-all"
         disabled={isRunning}
@@ -111,14 +172,18 @@ export default function UploadPanel({ onAnalyzeText, onAnalyzeFile, steps, statu
 
       <NoteQualityHint text={text} />
 
-      {/* Divider */}
+      {textTooShort && (
+        <p className="text-xs text-amber-600 dark:text-amber-400">
+          Add at least {MIN_NOTE_LENGTH} characters, or load a sample note.
+        </p>
+      )}
+
       <div className="flex items-center gap-3">
         <div className="flex-1 h-px bg-stone-200 dark:bg-stone-700" />
         <span className="text-xs text-stone-400 dark:text-stone-500">or upload file</span>
         <div className="flex-1 h-px bg-stone-200 dark:bg-stone-700" />
       </div>
 
-      {/* Drop zone */}
       <div
         onDrop={handleDrop}
         onDragOver={e => { e.preventDefault(); setIsDragging(true) }}
@@ -127,12 +192,14 @@ export default function UploadPanel({ onAnalyzeText, onAnalyzeFile, steps, statu
         className={`p-4 rounded-xl border-2 border-dashed cursor-pointer transition-all text-center ${
           isDragging
             ? 'border-brand-400 bg-brand-50 dark:bg-brand-950/20'
-            : selectedFile
+            : selectedFile && !fileError
             ? 'border-green-300 dark:border-green-700 bg-green-50 dark:bg-green-950/20'
+            : fileError
+            ? 'border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950/20'
             : 'border-stone-200 dark:border-stone-700 hover:border-stone-300 dark:hover:border-stone-600 bg-stone-50 dark:bg-stone-800/50'
         }`}
       >
-        {selectedFile ? (
+        {selectedFile && !fileError ? (
           <div className="flex items-center justify-center gap-2">
             {selectedFile.name.endsWith('.pdf')
               ? <FileText size={16} className="text-green-500" />
@@ -140,7 +207,7 @@ export default function UploadPanel({ onAnalyzeText, onAnalyzeFile, steps, statu
             }
             <span className="text-xs font-medium text-green-600 dark:text-green-400">{selectedFile.name}</span>
             <button
-              onClick={e => { e.stopPropagation(); setSelectedFile(null) }}
+              onClick={e => { e.stopPropagation(); setSelectedFile(null); setFileError(null) }}
               className="text-xs text-stone-400 hover:text-red-500 transition-colors ml-1"
             >✕</button>
           </div>
@@ -151,11 +218,15 @@ export default function UploadPanel({ onAnalyzeText, onAnalyzeFile, steps, statu
               Drop PDF or image here
             </div>
             <div className="text-xs text-stone-400 dark:text-stone-500 mt-0.5">
-              PDF · JPG · PNG supported
+              PDF · JPG · PNG · max 10 MB
             </div>
           </>
         )}
       </div>
+
+      {fileError && (
+        <p className="text-xs text-red-600 dark:text-red-400">{fileError}</p>
+      )}
 
       <input
         ref={fileInputRef}
@@ -165,7 +236,18 @@ export default function UploadPanel({ onAnalyzeText, onAnalyzeFile, steps, statu
         className="hidden"
       />
 
-      {/* Submit button */}
+      {coldStartHint && (
+        <div className="p-2.5 rounded-lg bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800 text-xs text-amber-700 dark:text-amber-300">
+          {coldStartHint}
+        </div>
+      )}
+
+      {panelError && status === 'error' && (
+        <div className="p-2.5 rounded-lg bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-800 text-xs text-red-600 dark:text-red-400">
+          {panelError}
+        </div>
+      )}
+
       <button
         onClick={handleSubmit}
         disabled={!canSubmit}
@@ -175,10 +257,9 @@ export default function UploadPanel({ onAnalyzeText, onAnalyzeFile, steps, statu
             : 'bg-stone-100 dark:bg-stone-800 text-stone-400 dark:text-stone-600 cursor-not-allowed'
         }`}
       >
-        {isRunning ? 'Analyzing...' : 'Analyze note'}
+        {isRunning ? 'Analyzing...' : status === 'error' ? 'Try again' : 'Analyze note'}
       </button>
 
-      {/* Agent log */}
       {status !== 'idle' && (
         <AgentLog steps={steps} status={status} />
       )}

@@ -61,9 +61,21 @@ def health():
 async def analyze_stream(note: NoteInput):
     """Full LangGraph agent with SSE streaming — text input"""
     from agent.graph import agent
+    from tools.errors import user_safe_error
+
+    text = (note.text or "").strip()
+    if not text:
+        async def empty_generator():
+            yield {
+                "event": "error",
+                "data": json.dumps({
+                    "error": "Please enter a clinical note before analyzing."
+                })
+            }
+        return EventSourceResponse(empty_generator())
 
     async def event_generator():
-        state = build_initial_state(note.text, "text")
+        state = build_initial_state(text, "text")
 
         yield {
             "event": "started",
@@ -97,10 +109,13 @@ async def analyze_stream(note: NoteInput):
         except Exception as e:
             yield {
                 "event": "error",
-                "data": json.dumps({"error": str(e)})
+                "data": json.dumps({"error": user_safe_error(e)})
             }
 
     return EventSourceResponse(event_generator())
+
+
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 
 # ── File upload streaming endpoint ───────────────────────────────────────
@@ -109,9 +124,26 @@ async def analyze_upload_stream(file: UploadFile = File(...)):
     """Full LangGraph agent with SSE streaming — file upload (PDF or image)"""
     from agent.graph import agent
     from rag.loader import load_file
+    from tools.errors import user_safe_error, map_loader_error
 
     file_bytes = await file.read()
     filename = file.filename or "upload"
+
+    if len(file_bytes) > MAX_UPLOAD_BYTES:
+        async def too_large():
+            yield {
+                "event": "error",
+                "data": json.dumps({"error": "File too large (max 10 MB)."})
+            }
+        return EventSourceResponse(too_large())
+
+    if len(file_bytes) == 0:
+        async def empty_file():
+            yield {
+                "event": "error",
+                "data": json.dumps({"error": "Uploaded file is empty."})
+            }
+        return EventSourceResponse(empty_file())
 
     async def event_generator():
 
@@ -131,7 +163,7 @@ async def analyze_upload_stream(file: UploadFile = File(...)):
             if loaded.get("error"):
                 yield {
                     "event": "error",
-                    "data": json.dumps({"error": loaded["error"]})
+                    "data": json.dumps({"error": map_loader_error(loaded["error"])})
                 }
                 return
 
@@ -187,7 +219,7 @@ async def analyze_upload_stream(file: UploadFile = File(...)):
         except Exception as e:
             yield {
                 "event": "error",
-                "data": json.dumps({"error": str(e)})
+                "data": json.dumps({"error": user_safe_error(e)})
             }
 
     return EventSourceResponse(event_generator())

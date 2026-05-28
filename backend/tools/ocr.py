@@ -2,10 +2,12 @@ import os
 import base64
 from groq import Groq
 from dotenv import load_dotenv
+from tools.groq_utils import groq_call_with_retry, groq_configured, require_groq
+from tools.errors import user_safe_error
 
 load_dotenv()
 
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+_client = None
 
 TRANSCRIBE_PROMPT = """
 You are a medical transcription assistant.
@@ -40,17 +42,32 @@ Output: "patient has hypertension(inferred) and diabetes(inferred)"
 """
 
 
+def _get_client() -> Groq:
+    global _client
+    if _client is None:
+        require_groq()
+        _client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    return _client
+
+
 def transcribe_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
     """
     Transcribe a handwritten medical note image using Groq Vision.
     Returns dict with transcribed text and confidence info.
     """
-    try:
-        # Convert image to base64
-        image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+    if not groq_configured():
+        return {
+            "text": "",
+            "input_type": "image",
+            "error": "AI service is not configured (GROQ_API_KEY missing).",
+            "confidence_flags": []
+        }
 
-        # Step 1: Raw transcription
-        response = client.chat.completions.create(
+    try:
+        image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+        client = _get_client()
+
+        response = groq_call_with_retry(lambda: client.chat.completions.create(
             model="meta-llama/llama-4-scout-17b-16e-instruct",
             messages=[
                 {
@@ -69,17 +86,17 @@ def transcribe_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
                     ]
                 }
             ],
-            max_tokens=1000
-        )
+            max_tokens=1000,
+            timeout=60,
+        ))
 
         raw_text = response.choices[0].message.content.strip()
 
-        # Step 2: If unclear words found, try to infer them
         has_unclear = "[unclear]" in raw_text
         final_text = raw_text
 
         if has_unclear:
-            infer_response = client.chat.completions.create(
+            infer_response = groq_call_with_retry(lambda: client.chat.completions.create(
                 model="meta-llama/llama-4-scout-17b-16e-instruct",
                 messages=[
                     {
@@ -87,15 +104,14 @@ def transcribe_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
                         "content": f"{INFER_PROMPT}\n\nText to fix:\n{raw_text}"
                     }
                 ],
-                max_tokens=1000
-            )
+                max_tokens=1000,
+                timeout=60,
+            ))
             final_text = infer_response.choices[0].message.content.strip()
 
-        # Count inferred words for confidence scoring
         inferred_count = final_text.count("(inferred)")
         remaining_unclear = final_text.count("[unclear]")
 
-        # Build confidence flags
         confidence_flags = []
         if inferred_count > 0:
             confidence_flags.append(
@@ -116,9 +132,10 @@ def transcribe_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
         }
 
     except Exception as e:
+        safe = user_safe_error(e)
         return {
             "text": "",
             "input_type": "image",
-            "error": str(e),
-            "confidence_flags": [f"OCR failed: {str(e)}"]
+            "error": safe,
+            "confidence_flags": [f"OCR failed: {safe}"]
         }

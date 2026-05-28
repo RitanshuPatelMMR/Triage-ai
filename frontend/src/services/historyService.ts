@@ -29,34 +29,43 @@ async function syncToCloud(entry: HistoryEntry): Promise<void> {
   }
 }
 
-async function fetchCloudHistory(): Promise<HistoryEntry[]> {
+export type CloudHistoryResult = {
+  entries: HistoryEntry[]
+  offline: boolean
+}
+
+async function fetchCloudHistory(): Promise<CloudHistoryResult> {
   try {
     const resp = await fetch(`${API_BASE}/history/${SESSION_ID}`, {
       method: 'GET',
       headers: { 'Content-Type': 'application/json' }
     })
-    if (!resp.ok) return []
+    if (!resp.ok) {
+      return { entries: [], offline: true }
+    }
 
     const data = await resp.json()
     const reports = data.reports || []
 
-    // Convert DynamoDB format to HistoryEntry format
-    return reports.map((item: any) => ({
-      id: item.request_id,
-      timestamp: item.created_at,
-      inputType: item.input_type as 'text' | 'pdf' | 'image',
-      report: item.report,
-      humanVerified: item.human_verified || false,
-    }))
+    return {
+      entries: reports.map((item: any) => ({
+        id: item.request_id,
+        timestamp: item.created_at,
+        inputType: item.input_type as 'text' | 'pdf' | 'image',
+        report: item.report,
+        humanVerified: item.human_verified || false,
+      })),
+      offline: false,
+    }
   } catch (e) {
     console.warn('Cloud history fetch failed, using local:', e)
-    return []
+    return { entries: [], offline: true }
   }
 }
 
-async function verifyInCloud(created_at: string): Promise<void> {
+async function verifyInCloud(created_at: string): Promise<boolean> {
   try {
-    await fetch(`${API_BASE}/history/verify`, {
+    const resp = await fetch(`${API_BASE}/history/verify`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -64,8 +73,10 @@ async function verifyInCloud(created_at: string): Promise<void> {
         created_at
       })
     })
+    return resp.ok
   } catch (e) {
     console.warn('Cloud verify failed:', e)
+    return false
   }
 }
 
@@ -99,10 +110,9 @@ export const historyService = {
   },
 
   // Load from DynamoDB and sync to localStorage
-  async loadFromCloud(): Promise<HistoryEntry[]> {
-    const cloudEntries = await fetchCloudHistory()
+  async loadFromCloud(): Promise<{ entries: HistoryEntry[]; offline: boolean }> {
+    const { entries: cloudEntries, offline } = await fetchCloudHistory()
     if (cloudEntries.length > 0) {
-      // Merge cloud entries with local (cloud takes priority)
       const local = this.getAll()
       const cloudIds = new Set(cloudEntries.map(e => e.id))
       const localOnly = local.filter(e => !cloudIds.has(e.id))
@@ -110,15 +120,19 @@ export const historyService = {
         .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
         .slice(0, 100)
       localStorage.setItem(STORAGE_KEY, JSON.stringify(merged))
-      return merged
+      return { entries: merged, offline }
     }
-    return this.getAll()
+    return { entries: this.getAll(), offline }
   },
 
-  save(report: Report, inputType: 'text' | 'pdf' | 'image'): HistoryEntry {
+  save(
+    report: Report,
+    inputType: 'text' | 'pdf' | 'image',
+    meta?: { requestId?: string; createdAt?: string }
+  ): HistoryEntry {
     const entry: HistoryEntry = {
-      id: crypto.randomUUID(),
-      timestamp: new Date().toISOString(),
+      id: meta?.requestId ?? crypto.randomUUID(),
+      timestamp: meta?.createdAt ?? new Date().toISOString(),
       inputType,
       report,
       humanVerified: false,
@@ -133,8 +147,7 @@ export const historyService = {
     return this.getAll().find(e => e.id === id) ?? null
   },
 
-  async markVerified(id: string): Promise<void> {
-    // Update localStorage
+  async markVerified(id: string): Promise<boolean> {
     const all = this.getAll()
     const entry = all.find(e => e.id === id)
     const updated = all.map(e =>
@@ -142,10 +155,10 @@ export const historyService = {
     )
     localStorage.setItem(STORAGE_KEY, JSON.stringify(updated))
 
-    // Update DynamoDB
     if (entry) {
-      await verifyInCloud(entry.timestamp)
+      return verifyInCloud(entry.timestamp)
     }
+    return true
   },
 
   async delete(id: string): Promise<void> {

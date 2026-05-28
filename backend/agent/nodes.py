@@ -1,8 +1,11 @@
 import os
 import re
 import json
+import asyncio
 import requests
 from langchain_groq import ChatGroq
+from tools.groq_utils import groq_call_with_retry, is_rate_limit_error
+from tools.errors import user_safe_error
 from langchain_core.messages import SystemMessage, HumanMessage
 from agent.state import AgentState
 from agent.prompts import CLEAN_SYSTEM_PROMPT, EXTRACT_SYSTEM_PROMPT, SUMMARY_SYSTEM_PROMPT
@@ -141,11 +144,20 @@ async def parse_and_clean(state: AgentState) -> AgentState:
             SystemMessage(content=CLEAN_SYSTEM_PROMPT),
             HumanMessage(content=state["raw_input"])
         ]
-        result = await llm.ainvoke(messages)
+        result = None
+        for attempt in range(3):
+            try:
+                result = await llm.ainvoke(messages)
+                break
+            except Exception as e:
+                if is_rate_limit_error(e) and attempt < 2:
+                    await asyncio.sleep(3 * (attempt + 1))
+                    continue
+                raise
         state["cleaned_text"] = result.content.strip()
 
     except Exception as e:
-        state["errors"].append(f"parse_and_clean: {str(e)}")
+        state["errors"].append(f"parse_and_clean: {user_safe_error(e)}")
         state["cleaned_text"] = state["raw_input"]
 
     return state
@@ -160,7 +172,7 @@ async def extract_entities(state: AgentState) -> AgentState:
         from groq import Groq
         client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-        response = client.chat.completions.create(
+        response = groq_call_with_retry(lambda: client.chat.completions.create(
             model="llama-3.1-8b-instant",
             temperature=0.1,
             messages=[
@@ -179,14 +191,15 @@ If information is not present use null or empty array. Never hallucinate."""
                 }
             ],
             response_format={"type": "json_object"},
-        )
+            timeout=60,
+        ))
 
         raw = response.choices[0].message.content
         parsed = json.loads(raw)
         state["entities"] = _normalize_entities(parsed)
 
     except Exception as e:
-        state["errors"].append(f"extract_entities: {str(e)}")
+        state["errors"].append(f"extract_entities: {user_safe_error(e)}")
         state["entities"] = _empty_entities()
 
     return state
@@ -398,6 +411,8 @@ def _query_fda(drug_name: str) -> dict | None:
             "source": "FDA Drug Label Database"
         }
 
+    except requests.Timeout:
+        return None
     except Exception:
         return None
 

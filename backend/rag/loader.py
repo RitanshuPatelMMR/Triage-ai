@@ -1,5 +1,6 @@
 import io
 from tools.ocr import transcribe_image
+from tools.errors import user_safe_error
 
 
 SUPPORTED_IMAGE_TYPES = {
@@ -10,6 +11,16 @@ SUPPORTED_IMAGE_TYPES = {
 }
 
 SUPPORTED_PDF_TYPES = {"pdf"}
+
+OCR_MAX_PAGES = 3
+
+
+def _pdf_total_pages(file_bytes: bytes) -> int | None:
+    try:
+        import pypdf
+        return len(pypdf.PdfReader(io.BytesIO(file_bytes)).pages)
+    except Exception:
+        return None
 
 
 def load_file(file_bytes: bytes, filename: str) -> dict:
@@ -59,12 +70,18 @@ def _load_pdf(file_bytes: bytes, filename: str) -> dict:
         # Bug B fix: detect junk/empty extraction → fallback to OCR
         full_text = "\n\n".join(pages_text)
         if _is_meaningful_text(full_text):
+            flags = []
+            total = len(pdf_reader.pages)
+            if total > OCR_MAX_PAGES:
+                flags.append(
+                    f"PDF has {total} pages — all pages were read from embedded text."
+                )
             return {
                 "text": full_text,
                 "input_type": "pdf",
-                "page_count": len(pdf_reader.pages),
+                "page_count": total,
                 "pages_with_text": len(pages_text),
-                "confidence_flags": []
+                "confidence_flags": flags
             }
 
         # Fallback: render PDF as image → Groq Vision OCR
@@ -78,8 +95,8 @@ def _load_pdf(file_bytes: bytes, filename: str) -> dict:
             return {
                 "text": "",
                 "input_type": "pdf",
-                "error": str(e),
-                "confidence_flags": [f"PDF loading failed: {str(e)}"]
+                "error": user_safe_error(e),
+                "confidence_flags": [f"PDF loading failed: {user_safe_error(e)}"]
             }
 
 
@@ -99,10 +116,18 @@ def _load_pdf_via_ocr(file_bytes: bytes) -> dict:
         from pdf2image import convert_from_bytes
         import io as _io
 
-        pages = convert_from_bytes(file_bytes, dpi=200, first_page=1, last_page=3)
+        total_pages = _pdf_total_pages(file_bytes)
+        pages = convert_from_bytes(
+            file_bytes, dpi=200, first_page=1, last_page=OCR_MAX_PAGES
+        )
 
         all_texts = []
         all_flags = []
+        if total_pages and total_pages > OCR_MAX_PAGES:
+            all_flags.append(
+                f"Only first {OCR_MAX_PAGES} of {total_pages} pages were analyzed "
+                "(scanned PDF limit)."
+            )
 
         for i, page_img in enumerate(pages):
             # Convert PIL image → bytes
@@ -132,11 +157,12 @@ def _load_pdf_via_ocr(file_bytes: bytes) -> dict:
         }
 
     except Exception as e:
+        safe = user_safe_error(e)
         return {
             "text": "",
             "input_type": "pdf_ocr",
-            "error": str(e),
-            "confidence_flags": [f"PDF OCR failed: {str(e)}"]
+            "error": safe,
+            "confidence_flags": [f"PDF OCR failed: {safe}"]
         }
 
 
